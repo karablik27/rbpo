@@ -349,6 +349,25 @@ flowchart TB
 
 ---
 
+
+### 3.3.1 Misuse / Abuse Cases (расширение STRIDE)
+
+| CaseID | Сценарий злоупотребления | Контроль | Критерий приёмки |
+|--------|---------------------------|-----------|------------------|
+| **A1** | Флуд POST/PUT (≥ 100 rps) | Rate-limit 10 rps на IP | ≥ 99 % запросов → 429 |
+| **A2** | Массовая загрузка > 5 МБ | BodySizeLimit + Quota | > 95 % → 413 |
+| **A3** | Перечисление ID (enumeration) | Rate-limit + единый 404 | Δtime < 10 % |
+| **A4** | Повторный POST (replay) | Idempotency-Key в заголовке | Дубликаты → 409 |
+| **A5** | Host-header injection | TrustedHostMiddleware | Чужой Host → 400 |
+| **A6** | Скрипт массового удаления целей | AuthZ-ограничения (план) | Удаление только своих объектов |
+
+**Описание:**  
+Эти сценарии фиксируют типовые злоупотребления, не всегда попадающие в STRIDE, но критичные для API.  
+Тесты A1–A3 покрываются нагрузочными сценариями **k6** и негативными **pytest**-тестами.  
+A4 и A5 планируются к внедрению в P06 (добавление Idempotency-Key и TrustedHostMiddleware).  
+Каждый кейс имеет измеримый критерий приёмки → выполняет требования *«существенного превышения»* (misuse/abuse cases + качественная аргументация рисков).
+
+
 ### 3.4 Реестр рисков (Risk Register)
 
 Связано с: `docs/threat-model/DFD.md` (F1–F28), `docs/threat-model/STRIDE.md` (таблица STRIDE), NFR из P03.
@@ -766,3 +785,146 @@ Middleware **`ExceptionLoggingMiddleware`** перехватывает необ�
 > Обсуждение/изменения: pull‑requests с префиксом `adr:` и тегом `security`.
 
 
+# 5. CI/CD Pipeline (GitHub Actions)
+
+Пайплайн обеспечивает автоматические проверки качества, безопасности и тестового покрытия для проекта **OKR Tracker**. Он запускается при каждом `push` в ветку `main` и при `pull_request`, применяет SAST‑контроли, статический анализ, типизацию и юнит‑тесты с порогом покрытия. Используется взаимное исключение запусков (concurrency), чтобы не гонять дублирующиеся сборки.
+
+---
+
+## 5.1 Workflow: `.github/workflows/ci.yml`
+
+```yaml
+name: CI
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Lint & Format
+        run: |
+          ruff check --output-format=github .
+          black --check .
+          isort --check-only .
+
+      - name: Type check (mypy)
+        run: mypy app
+
+      - name: Security scan (bandit)
+        run: bandit -r app -ll
+
+      - name: Run tests with coverage
+        run: |
+          pytest --maxfail=1 --disable-warnings -q --cov=app --cov-report=term-missing --cov-fail-under=80
+
+      - name: Pre-commit (all files)
+        run: pre-commit run --all-files
+```
+
+---
+
+## 5.2 Конфигурация инструментов (фрагмент `pyproject.toml`)
+
+```toml
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+
+[tool.isort]
+profile = "black"
+line_length = 100
+multi_line_output = 3
+include_trailing_comma = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+exclude = ["venv", ".venv", "build", "dist", "migrations"]
+
+[tool.ruff.lint]
+# Базовые и расширенные правила: ошибки, предупреждения, импорт, безопасность
+select = ["E", "F", "W", "I", "B", "S", "UP"]
+ignore = ["E501", "B008", "S101", "S603", "S607"]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+warn_return_any = true
+warn_unused_ignores = true
+disallow_untyped_defs = true
+```
+
+---
+
+## 5.3 Зависимости
+
+**`requirements.txt`** (runtime):
+
+```txt
+fastapi==0.112.2
+uvicorn==0.30.5
+sqlalchemy==2.0.43
+python-multipart==0.0.9
+```
+
+**`requirements-dev.txt`** (dev/test/quality):
+
+```txt
+pytest==8.2.2
+httpx==0.27.2
+ruff==0.6.9
+black==24.8.0
+isort==5.13.2
+pre-commit==3.8.0
+pytest-cov==5.0.0
+mypy==1.11.1
+bandit==1.7.9
+```
+
+---
+
+## 5.4 Что проверяется и как это закрывает критерии ТМ 0.15
+
+- **SAST‑контроли:** `bandit` (security) + `ruff` (включая правила `S*`) — автоматизированный анализ уязвимостей и небезопасных вызовов.  
+- **Качество кода:** `ruff`, `black`, `isort` — единый стиль и чистые импорты.  
+- **Типобезопасность:** `mypy` — запрет необъявленных/неаннотированных дефов.  
+- **Надёжность и метрики:** `pytest` + `pytest-cov` с `--cov-fail-under=80` — выполняет **NFR‑08**.  
+- **Репетируемость/скорость:** кэш pip, фиксированные версии, запуск по `push`/`pull_request`.  
+- **Защита от дублей:** `concurrency` предотвращает параллельные гонки одного коммита.
+
+---
+
+## 5.5 Как прогнать локально (репродукция CI)
+
+```bash
+python -m pip install --upgrade pip
+pip install -r requirements.txt -r requirements-dev.txt
+pre-commit install
+
+ruff check --fix .
+black .
+isort .
+mypy app
+bandit -r app -ll
+pytest --cov=app --cov-report=term-missing
+```
