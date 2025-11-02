@@ -485,152 +485,299 @@ flowchart TB
   `![Body limit](./docs/img/body_limit_413.png)`
 
 
-## 4. ADR — Архитектурные решения безопасности
+# 4 ADR — Архитектурные решения безопасности (OKR API / FastAPI)
 
-Ниже зафиксированы ключевые решения, которые напрямую закрывают угрозы из STRIDE и требования из NFR. Для каждого ADR указаны: **зачем это нужно**, **где реализовано в коде**, **как проверяется**, и **трассировка** на DFD/риски.
+## ADR‑001: Валидация и ограничение тела запроса (≤ 1 MB)
 
----
+**Дата:** 2025‑10‑21  
+**Статус:** Accepted
 
-### ADR-001: Валидация и ограничение тела запроса (≤ 1 MB)
-**Дата:** 2025‑10‑21 • **Статус:** Accepted
+### Зачем
+Предотвратить DoS за счёт отправки чрезмерно больших тел запросов и рано отбрасывать неподходящие запросы на периметре приложения. Выполняет **NFR‑03** и снижает риск **R2 (DoS крупным телом)**.
 
-#### Зачем
-Предотвратить DoS перегрузкой крупными телами и раннее отсекать неподходящие запросы на периметре приложения. Выполняет NFR‑03 и снижает риск **R2**.
-
-#### Context
-Сервис предоставляет POST/PUT эндпоинты (`/objectives`, `/key_results`, `/files/upload`). Без глобального лимита злоумышленник может слать гигабайтные payload’ы и блокировать воркеры.
+### Контекст
+Сервис предоставляет POST/PUT эндпоинты (`/objectives`, `/key_results`, `/files/upload`). Без глобального лимита злоумышленник может слать гигабайтные payload’ы и блокировать воркеры/IO.
 
 - **DFD:** F24 (*BodySizeLimit*), TB1/TB3.  
-- **Risk Register:** R2 (*DoS крупным телом*).
+- **Risks:** R2 (*DoS крупным телом*).  
+- **STRIDE:** **D** (Denial of Service).
 
-#### Decision
+### Решение
 Ввести middleware **`BodySizeLimitMiddleware`**:
-1) читает `await request.body()`; 2) при `len(body) > 1_048_576` возвращает **413**; 3) иначе передаёт дальше.
+1. Считывает `await request.body()` (с учётом порядка middleware — см. ниже).  
+2. При `len(body) > MAX_BODY_SIZE` возвращает **413 Payload Too Large** (Problem+JSON при включённом ADR‑002).  
+3. Иначе передаёт управление дальше.
 
-**Параметры:** `MAX_BODY_SIZE = 1 * 1024 * 1024`. Подключается в `main.py` **до** роутеров.
+**Параметры/конфиг:**
+- `MAX_BODY_SIZE` (байты), по умолчанию `1_048_576` (1 МБ).  
+- Флаг `BODY_LIMIT_ENABLED` (`"1"`/`"0"`).  
+- Подключение строго **до** роутеров и до парсинга тела (см. порядок middleware).
 
-#### Где в коде / как проверить
-- Код: `app/middleware/limits.py`, регистрация — `app/main.py`.  
-- Тесты: `tests/test_limits.py` (">1MB → 413/422").  
-- CI: запускается `pytest` в GitHub Actions.  
-- Ops: лимит дублируется на ingress (`client_max_body_size`) при прод‑деплое.
+**Псевдокод:**
+```python
+class BodySizeLimitMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        body = await request.body()
+        if len(body) > settings.MAX_BODY_SIZE:
+            return problem_413()
+        request.state.cached_body = body  # если нужно прокинуть дальше
+        return await call_next(request)
+```
 
-#### Alternatives
-- Лимит в каждом handler → дублирование/риски пропуска.
-- Только на ingress → сложно тестировать юнитами.
-- **Комбинация** (middleware + ingress) — целевое состояние.
+### Где в коде / Как проверить
+- **Код:** `app/middleware/limits.py`, регистрация — `app/main.py`.  
+- **Тесты:** `tests/test_limits.py` (сценарии «>1MB → 413», «≈1MB → 200/422»).  
+- **CI:** `pytest` + `ruff` (линтер) в GitHub Actions.  
+- **Ops:** дубль лимита на ingress (Nginx `client_max_body_size`).
 
-#### Consequences
-- Снижение R2; предсказуемая ошибка 413 вместо таймаутов; контроль доли 413 и влияния на p95 (NFR‑01).
+### Альтернативы
+- Лимит внутри каждого handler → дублирование и риск пропуска.  
+- Только на ingress → неудобно тестировать unit‑тестами.  
+- **Комбинация** (middleware + ingress) — **целевое состояние** для prod.
 
-#### DoD & Rollout
-- [x] Middleware подключён, тесты зелёные, линтеры пройдены.  
-- Этап 2: включить лимит на ingress (canary 10% → 100%), метрики p95/413.
+### Последствия
+- Снижение R2; предсказуемая **413** вместо таймаутов.  
+- Влияние на p95 — контролируется метриками (**NFR‑01**).  
+- Важно: одноразовое чтение тела — соблюдён порядок middleware.
+
+### DoD & Rollout
+- [x] Middleware подключён, тесты зелёные, линтер пройдён.  
+- Stage/Prod: включить лимит на ingress (canary 10% → 100%), следить за 413 и p95.
+
+### Связанные артефакты / ссылки
+- **NFR‑03** (issue #15)  
+- **DFD**: F24, TB1/TB3  
+- **Risk:** R2  
+- **Код:** `app/middleware/limits.py`, `app/main.py`  
+- **Тесты:** `tests/test_limits.py`  
+- **PR:** `p05-secure-coding → main`
 
 ---
 
-### ADR-002: Централизованная обработка ошибок в формате RFC 7807
-**Дата:** 2025‑10‑21 • **Статус:** Accepted
+## ADR‑002: Централизованная обработка ошибок (RFC 7807 Problem+JSON)
 
-#### Зачем
-Единый безопасный формат ошибок без утечки внутренних деталей. Закрывает NFR‑04 и снижает **R3**/**R8**.
+**Дата:** 2025‑10‑21  
+**Статус:** Accepted
 
-#### Context
-Без унификации фреймворк может отдавать трейсбеки. Это **Information Disclosure** и нестабильный контракт для клиентов.
+### Зачем
+Единый безопасный формат ошибок без утечки внутренних деталей/стека. Закрывает **NFR‑04** и снижает риски **R3**/**R8**.
+
+### Контекст
+По умолчанию фреймворк может отдать трейсбеки/строки ошибок → **Information Disclosure** и нестабильный контракт для клиентов.
 
 - **DFD:** F22–F23 (*ExceptionLogging*), F21–F28.  
-- **Risks:** R3 (*утечка деталей ошибок*), R8 (*исключения «вешают» пайплайн*).
+- **Risks:** R3 (*утечка деталей ошибок*), R8 (*исключения «вешают» пайплайн*).  
+- **STRIDE:** **I** (Information Disclosure), **D** (Denial of Service) опосредованно.
 
-#### Decision
+### Решение
 Middleware **`ExceptionLoggingMiddleware`** перехватывает необработанные исключения, пишет в `error.log` и возвращает **Problem+JSON (RFC 7807)** вида:
 ```json
 {"type":"about:blank","title":"Internal Server Error","status":500,"detail":"An unexpected error occurred."}
 ```
+Опционально добавляется `correlation_id` (см. ниже).
 
-#### Где в коде / как проверить
-- Код: `app/middleware/errors.py`; регистрация — `app/main.py`.  
-- Тесты: `tests/test_errors.py`, `tests/test_exceptions.py`.  
-- Логи: наличие записи уровня ERROR при 5xx.  
-- CI: pytest + coverage.
+**Порядок включения:** последним среди защитных middleware, чтобы поймать всё сверху.
 
-#### Alternatives
-- Хэндлеры на каждый тип исключения → сложно покрыть ≥95% случаев.  
-- Вывод стека в DEBUG → риск утечки.
+**Флаги/конфиг:**
+- `RFC7807_ENABLED` (`"1"`/`"0"`).  
+- `LOG_LEVEL=ERROR` для ошибок; логгер пишет `exc_info=True`.
 
-#### Consequences
-- Снижение R3/R8, предсказуемость для клиентов, готовность к audit‑trail.
+### Где в коде / Как проверить
+- **Код:** `app/middleware/errors.py`; регистрация — `app/main.py`.  
+- **Тесты:** `tests/test_errors.py`, `tests/test_exceptions.py`.  
+- **Логи:** наличие записи уровня ERROR при 5xx.  
+- **CI:** pytest + coverage.
 
-#### DoD & Rollout
-- [x] Подключён **последним** среди защитных middleware.  
-- Dev/Prod: включено; при необходимости добавляется `correlation_id`.
+### Альтернативы
+- Хэндлеры на каждый тип исключения → сложнее обеспечить ≥95% покрытия.  
+- Вывод stacktrace в DEBUG → риск утечки.  
+- Комбинация: middleware + точечные `exception_handler` — **выбрано**.
+
+### Последствия
+- Снижение R3/R8; предсказуемость для клиентов; готовность к audit‑trail.  
+- Совместимость с OpenAPI — пример ошибок унифицирован.
+
+### DoD & Rollout
+- [x] Middleware подключён **последним**.  
+- [x] Логи при 5xx подтверждены.  
+- [x] Тесты зелёные (формат RFC 7807).  
+- Prod: без даунтайма; мониторинг частоты 5xx и размера `error.log`.  
+- Опция: добавить `correlation_id` через отдельный middleware.
+
+### Связанные артефакты / ссылки
+- **NFR‑04** (issue #16)  
+- **Risks:** R3, R8  
+- **DFD:** F22–F23/F21–F28  
+- **Код:** `app/middleware/errors.py`, `app/main.py`  
+- **Тесты:** `tests/test_errors.py`, `tests/test_exceptions.py`  
+- **PR:** `p05-secure-coding → main`
 
 ---
 
-### ADR-003: Защита периметра API (X‑API‑Key) и принудительный HTTPS (HSTS)
-**Дата:** 2025‑10‑21 • **Статус:** Accepted
+## ADR‑003: Защита периметра API (X‑API‑Key) и принудительный HTTPS (HSTS)
 
-#### Зачем
-Ограничить неавторизованные **модифицирующие** запросы и навязать безопасный транспорт для браузеров. Закрывает **R1** и часть рисков MITM.
+**Дата:** 2025‑10‑21  
+**Статус:** Accepted
 
-#### Context
-Периметр TB1 (F1 User→API). Нужна простая защита до внедрения полноценной AuthN/AuthZ.
+### Зачем
+Ограничить неавторизованные **модифицирующие** запросы и заставить браузеры использовать HTTPS. Закрывает **R1** и часть сетевых рисков (downgrade/MITM).
+
+### Контекст
+Периметр TB1 (F1 User→API). Нужна простая защита до внедрения полноценной AuthN/AuthZ. Также корректная работа CORS‑preflight.
 
 - **DFD:** F1, TB1.  
-- **Risks:** R1 (*анонимный write*), сопутствующие сетевые риски.
+- **Risks:** R1 (*анонимный write*), сопутствующие сетевые риски.  
+- **STRIDE:** **S** (Spoofing) / **T** (Tampering) частично, **I** (Information Disclosure) частично, **D** (DoS) снижает поверхность.
 
-#### Decision
-1) **`ApiKeyGateMiddleware`**: для `POST/PUT/PATCH/DELETE` требует `X-API-Key`, заданный через `app.state.API_EDGE_KEY`/`API_EDGE_KEY` (env); сравнение `hmac.compare_digest`.  
-2) **`HSTSMiddleware`**: добавляет `Strict-Transport-Security: max-age=15552000; includeSubDomains[; preload]`.  
-3) **CORS allowlist**: `ALLOWED_ORIGINS` без `*` при credentials.
+### Решение
+1) **`ApiKeyGateMiddleware`**: для `POST/PUT/PATCH/DELETE` требует `X-API-Key`, заданный через `app.state.API_EDGE_KEY`/`API_EDGE_KEY` (env); сравнение `hmac.compare_digest`. При отсутствии/ошибке — **401** (Problem+JSON) + `WWW-Authenticate: ApiKey`.
 
-#### Где в коде / как проверить
-- Код: `app/middleware/security.py`, `app/main.py` (CORS).  
-- Тесты: `tests/test_r1_api_key_gate.py`, `tests/test_r1_cors_hsts.py`.  
-- Конфиг: переменные окружения `API_EDGE_KEY`, `ALLOWED_ORIGINS`.
+2) **`HSTSMiddleware`**: добавляет `Strict-Transport-Security: max-age=15552000; includeSubDomains[; preload]`.
 
-#### Alternatives
-- OAuth2/JWT — избыточно для текущего этапа.  
-- BasicAuth — слабее, требует постоянной передачи секрета.
+3) **CORS allowlist**: `ALLOWED_ORIGINS` (без `*` при credentials), корректные preflight‑ответы.
 
-#### Consequences
-- Снижение R1; метрики 401 без ключа; корректные preflight‑ответы.
+**Конфиг:**
+- `API_EDGE_KEY`, `ALLOWED_ORIGINS`.  
+- `HSTS_MAX_AGE`, `HSTS_INCLUDE_SUBDOMAINS`, `HSTS_PRELOAD`.  
+- Возможность горячего включения ключа через `app.state` (без рестарта).
 
-#### DoD & Rollout
-- [x] Middleware подключены; CORS настроен.  
-- Dev: ключ выключен (нет `API_EDGE_KEY`), Stage/Prod: canary 10% → 100% с мониторингом.
+**Псевдокод:**
+```python
+if request.method in {"POST","PUT","PATCH","DELETE"}:
+    supplied = request.headers.get("X-API-Key")
+    if not supplied or not hmac.compare_digest(supplied, settings.API_EDGE_KEY):
+        return problem_401_www_auth_api_key()
+```
+
+**Ingress (дублирование):**
+```nginx
+add_header Strict-Transport-Security "max-age=15552000; includeSubDomains" always;
+```
+
+### Где в коде / Как проверить
+- **Код:** `app/middleware/security.py`, `app/main.py` (CORS).  
+- **Тесты:** `tests/test_r1_api_key_gate.py`, `tests/test_r1_cors_hsts.py`.  
+- **Конфиг:** переменные окружения `API_EDGE_KEY`, `ALLOWED_ORIGINS`.
+
+### Альтернативы
+- OAuth2/JWT — избыточно на текущем этапе.  
+- BasicAuth — слабее (секрет передаётся каждый раз).
+
+### Последствия
+- Снижение R1; метрики 401 без ключа; корректные preflight‑ответы.  
+- Простая миграция на OAuth2/JWT позже (контракт сохранён).
+
+### DoD & Rollout
+- [x] Middleware подключены, CORS настроен.  
+- Dev: ключ выключен (нет `API_EDGE_KEY`), Stage/Prod: canary 10% → 100% с мониторингом.  
+- TLS и HSTS на ingress.
+
+### Связанные артефакты / ссылки
+- **DFD:** F1, TB1  
+- **Risks:** R1 (+ смежные)  
+- **NFR:** NFR‑06/‑07 (опосредованно)  
+- **Код:** `app/middleware/security.py`, `app/main.py`  
+- **Тесты:** `tests/test_r1_api_key_gate.py`, `tests/test_r1_cors_hsts.py`  
+- **PR:** `p05-secure-coding → main`
 
 ---
 
-### ADR-004: Whitelisting ответа через `response_model` (защита от утечек данных)
-**Дата:** 2025‑10‑21 • **Статус:** Accepted
+## ADR‑004: Whitelisting ответа через `response_model` (защита от утечек данных)
 
-#### Зачем
-Не допустить попадания внутренних полей моделей в публичный ответ. Закрывает **R7** и выполняет **NFR‑07**.
+**Дата:** 2025‑10‑21  
+**Статус:** Accepted
 
-#### Context
-Сериализация ORM‑объектов «как есть» может раскрывать служебные поля/PII. Нужна явная белая схема ответа.
+### Зачем
+Не допустить попадания внутренних полей (служебные флаги, ключи, PII) в публичный ответ. Выполняет **NFR‑07**, снижает риск **R7**.
+
+### Контекст
+Сериализация ORM‑объектов «как есть» может раскрывать служебные поля/PII. Нужна явная «белая» схема ответа.
 
 - **DFD:** F14/F16/F19 (чтение/агрегация/выдача), TB1.  
-- **Risk:** R7 (*лишние поля в ответах*).
+- **Risks:** R7 (*лишние поля в ответах*).  
+- **STRIDE:** **I** (Information Disclosure).
 
-#### Decision
-На всех публичных маршрутах указывать `response_model=...` (Pydantic v2):
-- `Objective` — только `id`, `title`, `description`, `isComplete`;
-- `KeyResult` — `id`, `title`, `target_value`, `current_value`, `objective_id`.
+### Решение
+На всех публичных маршрутах указывать `response_model=...` (Pydantic v2).  
+Примеры (условные поля):
+- `Objective` — `id`, `title`, `description`, `isComplete`
+- `KeyResult` — `id`, `title`, `target_value`, `current_value`, `objective_id`
 
-#### Где в коде / как проверить
-- Код: `app/schemas/*.py`, `app/routers/objectives.py`, `app/routers/key_results.py`.  
-- Тест: `tests/test_p05_extra_1.py` (утечки отсутствуют).  
-- Политика: `RESPONSE_MODEL_POLICY ∈ {off,warn,enforce}` — на `enforce` приложение не стартует, если есть ручки без `response_model`.
+**Политика контроля:**
+- `RESPONSE_MODEL_POLICY ∈ {off, warn, enforce}`.  
+  - `warn`: при старте приложения выполняется **проверка маршрутов** и логируются предупреждения для ручек без `response_model`.  
+  - `enforce`: приложение **не стартует**, если найдены публичные эндпоинты без `response_model`.
 
-#### Alternatives
-- Фильтрация руками в каждом handler — дорогая и ошибкоопасная.  
+### Где в коде / Как проверить
+- **Код:** `app/schemas/*.py`, `app/routers/objectives.py`, `app/routers/key_results.py`.  
+- **Тест:** `tests/test_p05_extra_1.py` (утечки отсутствуют).  
+- **CI:** pytest + (опц.) статическая проверка на старте.  
+- **Документация:** OpenAPI схемы соответствуют response‑моделям.
+
+### Альтернативы
+- Фильтрация руками в каждом handler — дорого и рискованно.  
 - Глобальный сериализатор — меньше типобезопасности.
 
-#### Consequences
-- Стабильный контракт, отсутствие случайных утечек, простые контрактные тесты.
+### Последствия
+- Стабильный контракт, отсутствие случайных утечек, простые контрактные тесты.  
+- Ускорение ревью/аудита — поле выходит только если whitelisted.
 
-#### DoD & Rollout
-- [x] Установлено на всех публичных ручках, тест зелёный.  
-- Stage: `RESPONSE_MODEL_POLICY=warn` (1 спринт) → Prod: `enforce`.
+### DoD & Rollout
+- [x] `response_model` на всех публичных ручках.  
+- [x] Тесты зелёные.  
+- Stage: `RESPONSE_MODEL_POLICY=warn` (1 спринт) → Prod: `enforce`.  
+- Rollback: `RESPONSE_MODEL_POLICY=off` (быстрое восстановление).
+
+### Связанные артефакты / ссылки
+- **NFR‑07** (issue #19)  
+- **DFD:** F14/F16/F19, TB1  
+- **Risk:** R7  
+- **Код:** `app/schemas/*.py`, `app/routers/*`  
+- **Тест:** `tests/test_p05_extra_1.py`  
+- **PR:** `p05-secure-coding → main`
+
+---
+
+## Матрица трассировки (ADR → NFR → Risks → DFD)
+
+| ADR  | NFR                                   | Risks                                  | DFD / Trust Boundaries             |
+|------|---------------------------------------|----------------------------------------|------------------------------------|
+| 001  | NFR‑03 (ограничение входных данных)   | R2 (DoS крупным телом)                 | F24 (*BodySizeLimit*), TB1/TB3     |
+| 002  | NFR‑04 (централизованная обработка)   | R3 (утечка деталей), R8 (зависание)    | F22–F23 (*ExceptionLogging*), TB1  |
+| 003  | NFR‑06/‑07 (логирование/валидация)    | R1 (анонимный write), сетевые (MITM)   | F1 (User→API), TB1                 |
+| 004  | NFR‑07 (валидация вывода/контракт)    | R7 (лишние поля в ответах)             | F14/F16/F19 (сериализация), TB1    |
+
+---
+
+## Общие заметки по внедрению и мониторингу
+
+**Порядок middleware (сверху вниз):**
+1. `HSTSMiddleware` (заголовки транспорта)  
+2. `BodySizeLimitMiddleware` (ADR‑001)  
+3. CORS (`CORSMiddleware`)  
+4. `ApiKeyGateMiddleware` (ADR‑003)  
+5. Роутеры  
+6. `ExceptionLoggingMiddleware` (ADR‑002, **последним** среди защитных)
+
+**Метрики/KPI:**
+- Доля ответов **413** (ADR‑001), влияние на p95.  
+- Доля ответов **RFC 7807** при 4xx/5xx (ADR‑002), объём `error.log`.  
+- Доля **401** без `X‑API‑Key` и корректность preflight (ADR‑003).  
+- Кол‑во предупреждений/ошибок политики `RESPONSE_MODEL_POLICY` (ADR‑004).
+
+**Операции/конфигурация:**
+- Все параметры вынесены в env; безопасные значения по умолчанию.  
+- Canary‑раскатка для чувствительных изменений (ключ, HSTS, лимиты).  
+- Логи и алерты подключены в CI/CD и прод‑мониторинге.
+
+**Совместимость и будущее:**
+- Плавная миграция к OAuth2/JWT на базе существующего edge‑gate.  
+- Возможность добавить `correlation_id` (middleware до логирования).  
+- Автоматическая проверка `response_model` на старте (enforce).
+
+---
+
+> Контакты владельца раздела: Security/Architecture (OKR API)  
+> Обсуждение/изменения: pull‑requests с префиксом `adr:` и тегом `security`.
+
 
