@@ -88,6 +88,27 @@
 
 Такое разделение повышает прозрачность API и позволяет легко тестировать endpoints, включая сценарии безопасности.
 
+### 1.5 Словесное описание раздела 1 (функциональность и архитектура)
+
+**Что показывают скриншоты и диаграммы:**
+- `![Swagger groups](./docs/img/swagger_groups.png)` — группы эндпоинтов в Swagger UI: **Objectives**, **Key Results**, **Files**. Это визуально подтверждает декомпозицию API и помогает проверять сценарии безопасности руками.
+- `![Objectives endpoints](./docs/img/obj_endpoints.png)` — CRUD для целей: `POST /objectives`, `GET /objectives`, `GET /objectives/{id}`, `DELETE /objectives/{id}`, `GET /objectives/{id}/progress`.
+- `![KeyResults endpoints](./docs/img/kr_endpoints.png)` — CRUD для ключевых результатов с привязкой к целям: `POST /key_results`, `PUT /key_results/{id}`, `GET /key_results/{obj_id}/by_objective`, `DELETE /key_results/{id}`.
+- `![Files upload](./docs/img/files_upload.png)` — загрузка изображений `POST /files/upload` с указанием допустимых типов и ограничений.
+
+**Как это имплементировано в коде:**
+- **Роутеры** (`app/routers/objectives.py`, `app/routers/key_results.py`, `app/routers/files.py`) описывают публичные контракты и выполняют только тонкую логику маршрутизации/валидации.
+- **Валидация входа/выхода** — через Pydantic v2 (`app/schemas/*.py`). Для публичных эндпоинтов задан `response_model`, поэтому наружу уходят **только whitelisted‑поля**.
+- **Расчёт прогресса** (`GET /objectives/{id}/progress`) агрегирует значения связанных KR через ORM‑запрос, возвращая процент выполнения.
+- **Хранение** — SQLAlchemy ORM (`app/models.py`, `app/db.py`) с каскадом `Objective → KeyResult`, что гарантирует консистентность при удалении цели.
+- **Загрузка файлов** — `secure_save_upload`: проверка *magic‑bytes*, лимит **≤ 5 МБ**, генерация безопасного **UUID**‑имени и запись вне пользовательских путей (защита от *path traversal*).
+
+**Архитектурные решения:**
+- Разделение на **Edge/API** (роутеры) ↔ **Сервис/ORM** упрощает тестирование и исключает бизнес‑логику из контроллеров.
+- Единый стиль ошибок **RFC 7807** и централизованный логгер делают поведение предсказуемым для клиента и пригодным для аудита.
+- Прямой доступ к БД извне отсутствует — только через ORM внутри приложения (граница доверия TB2).
+
+
 ---
 
 ## 2. Нефункциональные требования безопасности (NFR)
@@ -155,6 +176,35 @@
 | NFR-03 | Ограничение размера тела                 | `BodySizeLimitMiddleware`     | `test_payload_too_large`            | Passed    |
 | NFR-04 | Маскирование ошибок, RFC 7807            | `ExceptionLoggingMiddleware`  | `test_exception_logging`            | Passed    |
 | NFR-05 | ORM‑only, без raw SQL                    | SQLAlchemy ORM                | `test_no_raw_sql_usage`             | Passed    |
+
+### 2.5 Словесное описание NFR и BDD‑сценариев
+
+**Как читать таблицу NFR (2.2):**
+- Каждый NFR имеет **механизм в коде**, **метрику/порог** и **артефакт проверки**.  
+  Примеры:  
+  — **NFR‑03**: `BodySizeLimitMiddleware` → тело > 1 MB приводит к **413**; подтверждается тестом `test_payload_too_large` и логами.  
+  — **NFR‑05**: запрет `raw SQL`, только ORM → подтверждается линтерами (`ruff/bandit`) и ревью (отсутствие `.execute(sql)`).  
+  — **NFR‑08**: `pytest --cov --cov-fail-under=80` в CI рушит пайплайн при падении покрытия.
+
+**Что показывают скриншоты:**
+- `![RFC7807 error](./docs/img/rfc7807_sample.png)` — пример ошибки в формате **Problem+JSON** (маскирование PII, стабильные поля `type`, `title`, `status`).  
+- `![CI coverage](./docs/img/ci_cov.png)` — отчёт GitHub Actions: прохождение тестов и проверка **coverage ≥ 80%**.  
+- `![k6 p95](./docs/img/k6_p95.png)` — нагрузочный отчёт: **p95 ≤ 500 мс** для основных CRUD‑эндпоинтов (NFR‑01).  
+- `![Body limit](./docs/img/body_limit_413.png)` — демонстрация ответа **413** при превышении лимита тела (NFR‑03).
+
+**Связь с BDD (2.4):**
+- Таблица BDD фиксирует **Given–When–Then**: измеримые проверки NFR.  
+  Например, для NFR‑01 сценарий замеряет p95 времени ответа тестовыми прогонками; для NFR‑04 — проверяет, что искусственно сгенерированная ошибка превращается в **RFC7807** и логируется без утечки стека.
+
+**Имплементация контролей:**
+- **Лимиты/валидация** — middleware `BodySizeLimitMiddleware`, Pydantic‑схемы.  
+- **Ошибки/логирование** — `ExceptionLoggingMiddleware`, структурные access‑логи.  
+- **Безопасность БД** — SQLAlchemy ORM, каскады FK, отсутствие `raw SQL`.  
+- **Производительность** — оптимизированные селекты/агрегации, отсутствие тяжёлых блокировок в критическом пути, проверка k6/Locust.  
+- **Качество/надёжность** — `pytest`, негативные сценарии, `ruff/bandit/mypy` в CI.
+
+> Ссылки на исходники, тесты и workflow — см. раздел **3.5 Привязка к коду**. Для печатной версии отчёта положите скриншоты в `docs/img/` и обновите пути.
+
 
 ---
 
@@ -433,4 +483,154 @@ flowchart TB
   `![k6 p95](./docs/img/k6_p95.png)`
 - **Тест >1MB → 413**:  
   `![Body limit](./docs/img/body_limit_413.png)`
+
+
+## 4. ADR — Архитектурные решения безопасности
+
+Ниже зафиксированы ключевые решения, которые напрямую закрывают угрозы из STRIDE и требования из NFR. Для каждого ADR указаны: **зачем это нужно**, **где реализовано в коде**, **как проверяется**, и **трассировка** на DFD/риски.
+
+---
+
+### ADR-001: Валидация и ограничение тела запроса (≤ 1 MB)
+**Дата:** 2025‑10‑21 • **Статус:** Accepted
+
+#### Зачем
+Предотвратить DoS перегрузкой крупными телами и раннее отсекать неподходящие запросы на периметре приложения. Выполняет NFR‑03 и снижает риск **R2**.
+
+#### Context
+Сервис предоставляет POST/PUT эндпоинты (`/objectives`, `/key_results`, `/files/upload`). Без глобального лимита злоумышленник может слать гигабайтные payload’ы и блокировать воркеры.
+
+- **DFD:** F24 (*BodySizeLimit*), TB1/TB3.  
+- **Risk Register:** R2 (*DoS крупным телом*).
+
+#### Decision
+Ввести middleware **`BodySizeLimitMiddleware`**:
+1) читает `await request.body()`; 2) при `len(body) > 1_048_576` возвращает **413**; 3) иначе передаёт дальше.
+
+**Параметры:** `MAX_BODY_SIZE = 1 * 1024 * 1024`. Подключается в `main.py` **до** роутеров.
+
+#### Где в коде / как проверить
+- Код: `app/middleware/limits.py`, регистрация — `app/main.py`.  
+- Тесты: `tests/test_limits.py` (">1MB → 413/422").  
+- CI: запускается `pytest` в GitHub Actions.  
+- Ops: лимит дублируется на ingress (`client_max_body_size`) при прод‑деплое.
+
+#### Alternatives
+- Лимит в каждом handler → дублирование/риски пропуска.
+- Только на ingress → сложно тестировать юнитами.
+- **Комбинация** (middleware + ingress) — целевое состояние.
+
+#### Consequences
+- Снижение R2; предсказуемая ошибка 413 вместо таймаутов; контроль доли 413 и влияния на p95 (NFR‑01).
+
+#### DoD & Rollout
+- [x] Middleware подключён, тесты зелёные, линтеры пройдены.  
+- Этап 2: включить лимит на ingress (canary 10% → 100%), метрики p95/413.
+
+---
+
+### ADR-002: Централизованная обработка ошибок в формате RFC 7807
+**Дата:** 2025‑10‑21 • **Статус:** Accepted
+
+#### Зачем
+Единый безопасный формат ошибок без утечки внутренних деталей. Закрывает NFR‑04 и снижает **R3**/**R8**.
+
+#### Context
+Без унификации фреймворк может отдавать трейсбеки. Это **Information Disclosure** и нестабильный контракт для клиентов.
+
+- **DFD:** F22–F23 (*ExceptionLogging*), F21–F28.  
+- **Risks:** R3 (*утечка деталей ошибок*), R8 (*исключения «вешают» пайплайн*).
+
+#### Decision
+Middleware **`ExceptionLoggingMiddleware`** перехватывает необработанные исключения, пишет в `error.log` и возвращает **Problem+JSON (RFC 7807)** вида:
+```json
+{"type":"about:blank","title":"Internal Server Error","status":500,"detail":"An unexpected error occurred."}
+```
+
+#### Где в коде / как проверить
+- Код: `app/middleware/errors.py`; регистрация — `app/main.py`.  
+- Тесты: `tests/test_errors.py`, `tests/test_exceptions.py`.  
+- Логи: наличие записи уровня ERROR при 5xx.  
+- CI: pytest + coverage.
+
+#### Alternatives
+- Хэндлеры на каждый тип исключения → сложно покрыть ≥95% случаев.  
+- Вывод стека в DEBUG → риск утечки.
+
+#### Consequences
+- Снижение R3/R8, предсказуемость для клиентов, готовность к audit‑trail.
+
+#### DoD & Rollout
+- [x] Подключён **последним** среди защитных middleware.  
+- Dev/Prod: включено; при необходимости добавляется `correlation_id`.
+
+---
+
+### ADR-003: Защита периметра API (X‑API‑Key) и принудительный HTTPS (HSTS)
+**Дата:** 2025‑10‑21 • **Статус:** Accepted
+
+#### Зачем
+Ограничить неавторизованные **модифицирующие** запросы и навязать безопасный транспорт для браузеров. Закрывает **R1** и часть рисков MITM.
+
+#### Context
+Периметр TB1 (F1 User→API). Нужна простая защита до внедрения полноценной AuthN/AuthZ.
+
+- **DFD:** F1, TB1.  
+- **Risks:** R1 (*анонимный write*), сопутствующие сетевые риски.
+
+#### Decision
+1) **`ApiKeyGateMiddleware`**: для `POST/PUT/PATCH/DELETE` требует `X-API-Key`, заданный через `app.state.API_EDGE_KEY`/`API_EDGE_KEY` (env); сравнение `hmac.compare_digest`.  
+2) **`HSTSMiddleware`**: добавляет `Strict-Transport-Security: max-age=15552000; includeSubDomains[; preload]`.  
+3) **CORS allowlist**: `ALLOWED_ORIGINS` без `*` при credentials.
+
+#### Где в коде / как проверить
+- Код: `app/middleware/security.py`, `app/main.py` (CORS).  
+- Тесты: `tests/test_r1_api_key_gate.py`, `tests/test_r1_cors_hsts.py`.  
+- Конфиг: переменные окружения `API_EDGE_KEY`, `ALLOWED_ORIGINS`.
+
+#### Alternatives
+- OAuth2/JWT — избыточно для текущего этапа.  
+- BasicAuth — слабее, требует постоянной передачи секрета.
+
+#### Consequences
+- Снижение R1; метрики 401 без ключа; корректные preflight‑ответы.
+
+#### DoD & Rollout
+- [x] Middleware подключены; CORS настроен.  
+- Dev: ключ выключен (нет `API_EDGE_KEY`), Stage/Prod: canary 10% → 100% с мониторингом.
+
+---
+
+### ADR-004: Whitelisting ответа через `response_model` (защита от утечек данных)
+**Дата:** 2025‑10‑21 • **Статус:** Accepted
+
+#### Зачем
+Не допустить попадания внутренних полей моделей в публичный ответ. Закрывает **R7** и выполняет **NFR‑07**.
+
+#### Context
+Сериализация ORM‑объектов «как есть» может раскрывать служебные поля/PII. Нужна явная белая схема ответа.
+
+- **DFD:** F14/F16/F19 (чтение/агрегация/выдача), TB1.  
+- **Risk:** R7 (*лишние поля в ответах*).
+
+#### Decision
+На всех публичных маршрутах указывать `response_model=...` (Pydantic v2):
+- `Objective` — только `id`, `title`, `description`, `isComplete`;
+- `KeyResult` — `id`, `title`, `target_value`, `current_value`, `objective_id`.
+
+#### Где в коде / как проверить
+- Код: `app/schemas/*.py`, `app/routers/objectives.py`, `app/routers/key_results.py`.  
+- Тест: `tests/test_p05_extra_1.py` (утечки отсутствуют).  
+- Политика: `RESPONSE_MODEL_POLICY ∈ {off,warn,enforce}` — на `enforce` приложение не стартует, если есть ручки без `response_model`.
+
+#### Alternatives
+- Фильтрация руками в каждом handler — дорогая и ошибкоопасная.  
+- Глобальный сериализатор — меньше типобезопасности.
+
+#### Consequences
+- Стабильный контракт, отсутствие случайных утечек, простые контрактные тесты.
+
+#### DoD & Rollout
+- [x] Установлено на всех публичных ручках, тест зелёный.  
+- Stage: `RESPONSE_MODEL_POLICY=warn` (1 спринт) → Prod: `enforce`.
 
