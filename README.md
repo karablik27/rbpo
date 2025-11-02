@@ -934,3 +934,22 @@ mypy app
 bandit -r app -ll
 pytest --cov=app --cov-report=term-missing
 ```
+
+## Приложение
+
+<img width="592" height="61" alt="Снимок экрана 2025-11-02 в 23 27 43" src="https://github.com/user-attachments/assets/21064e4d-a24a-4e59-9595-1e0b209ef475" />
+
+<img width="421" height="140" alt="Снимок экрана 2025-11-02 в 23 29 26" src="https://github.com/user-attachments/assets/b4ae9cb3-db25-4db4-be0e-e41bf0fb4bea" />
+
+<img width="425" height="101" alt="Снимок экрана 2025-11-02 в 23 29 51" src="https://github.com/user-attachments/assets/096364bf-eb1a-4ef6-a266-d9fe56f6f65d" />
+
+<img width="810" height="618" alt="Снимок экрана 2025-11-02 в 23 30 20" src="https://github.com/user-attachments/assets/265157ff-6265-4b5e-965e-dcc80c6eb900" />
+
+<img width="836" height="551" alt="Снимок экрана 2025-11-02 в 23 30 38" src="https://github.com/user-attachments/assets/6dc88d3b-1b5a-4c98-8596-083949fb74f7" />
+
+<img width="1045" height="191" alt="Снимок экрана 2025-11-02 в 23 32 17" src="https://github.com/user-attachments/assets/e600a240-5bb8-4ca3-96d0-9f6c5b92117b" />
+
+<img width="711" height="588" alt="Снимок экрана 2025-11-02 в 23 30 55" src="https://github.com/user-attachments/assets/64cdc422-2a46-4d68-a95b-8885a3cb209c" />
+
+<img width="1050" height="350" alt="Снимок экрана 2025-11-02 в 23 32 45" src="https://github.com/user-attachments/assets/a3fd9e6f-57ca-4ba7-aebe-6927425fb000" />
+
