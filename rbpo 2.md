@@ -314,3 +314,148 @@ services:
 
 Такой процесс обеспечивает прозрачность: по одному PR можно отследить, какие именно требования задания были реализованы, как они проверялись и какие артефакты/скрины подтверждают результат.
 
+## 5. Превосходство: кэш, матрица, покрытие и релизные артефакты
+
+Для получения 9–10 баллов по проекту DV 0.2 в пайплайне реализован «расширенный» набор практик DevOps, который выходит за базовый чек-лист.
+
+### 5.1. Матрица версий Python
+
+CI выполняется в матрице из трёх версий Python:
+
+```yaml
+strategy:
+  fail-fast: false
+  matrix:
+    python-version: ["3.10", "3.11", "3.12"]
+```
+
+Это обеспечивает:
+
+- проверку совместимости кода с несколькими версиями интерпретатора;
+- полный отчёт по каждой версии (из-за `fail-fast: false` ни одна джоба не «обрубает» остальные).
+
+### 5.2. Кэш зависимостей и Docker-слоёв
+
+Для ускорения прогонов используется кэширование:
+
+**pip:**
+
+```yaml
+- name: Cache pip
+  uses: actions/cache@v4
+  with:
+    path: ~/.cache/pip
+    key: ${{ runner.os }}-pip-${{ matrix.python-version }}-${{ hashFiles('**/requirements*.txt') }}
+    restore-keys: |
+      ${{ runner.os }}-pip-
+```
+
+Ключ кэша завязан на ОС, версию Python и хэш `requirements*.txt`, поэтому кэш автоматически инвалидируется при изменении зависимостей.
+
+**Docker-слои (для python 3.12):**
+
+```yaml
+- name: Build Docker image (cached layers)
+  if: matrix.python-version == '3.12'
+  run: |
+    docker build       --cache-from=type=gha       --cache-to=type=gha,mode=max       -t okr-app:latest .
+```
+
+Используется backend `gha`, позволяющий переиспользовать слои между прогонами и существенно ускорять сборку образа.
+
+### 5.3. Отчёты покрытия и статических проверок
+
+При запуске тестов формируется несколько видов отчётов:
+
+```yaml
+pytest ...   --cov=app   --cov-report=xml   --cov-report=html   --cov-report=term-missing   --junitxml=reports/junit-${{ matrix.python-version }}.xml
+```
+
+В результате для каждой версии Python генерируются:
+
+- `coverage.xml` и HTML-отчёт `htmlcov/` с детализацией покрытия;
+- `junit-<version>.xml` — результаты тестов в формате JUnit;
+- отдельные файлы с логами `ruff` и `mypy` в каталоге `reports/`.
+
+Эти отчёты загружаются в CI как артефакты:
+
+```yaml
+- name: Upload test reports
+  if: always()
+  uses: actions/upload-artifact@v4
+  with:
+    name: test-reports-${{ matrix.python-version }}
+    path: reports/
+
+- name: Upload coverage HTML
+  if: always()
+  uses: actions/upload-artifact@v4
+  with:
+    name: coverage-html-${{ matrix.python-version }}
+    path: htmlcov/
+
+- name: Upload lint reports
+  if: always()
+  uses: actions/upload-artifact@v4
+  with:
+    name: lint-reports-${{ matrix.python-version }}
+    path: reports/
+```
+
+Флаг `if: always()` гарантирует сохранение артефактов даже при падении тестов — это упрощает анализ ошибок.
+
+### 5.4. Релизные артефакты: Docker-образ и security-отчёты
+
+Собранный Docker-образ проходит сканирование уязвимостей и сохраняется как релизный артефакт:
+
+```yaml
+- name: Trivy Scan (High & Critical)
+  if: matrix.python-version == '3.12'
+  uses: aquasecurity/trivy-action@0.17.0
+  with:
+    image-ref: okr-app:latest
+    format: 'table'
+    output: 'trivy-report.txt'
+    severity: 'HIGH,CRITICAL'
+    ignore-unfixed: true
+    exit-code: '0'
+
+- name: Upload security artifacts
+  if: matrix.python-version == '3.12'
+  uses: actions/upload-artifact@v4
+  with:
+    name: security-reports
+    path: trivy-report.txt
+
+- name: Save Docker image as artifact
+  if: matrix.python-version == '3.12'
+  run: docker save okr-app:latest -o okr-app.tar
+
+- name: Upload Docker image artifact
+  if: matrix.python-version == '3.12'
+  uses: actions/upload-artifact@v4
+  with:
+    name: docker-image
+    path: okr-app.tar
+```
+
+Итог:
+
+- `trivy-report.txt` — отчёт по High/Critical уязвимостям контейнера;
+- `okr-app.tar` — готовый Docker-образ, который можно скачать из CI и развернуть без пересборки.
+
+Это как раз соответствует требованию «релизные артефакты» в описании превосходства.
+
+### 5.5. Секреты остаются вне кода
+
+Во всех перечисленных шагах пайплайна ни один секрет **не захардкожен**:
+
+- для CI режим окружения принудительно выставляется в `ENV=ci`, а `DATABASE_URL` очищается;
+- реальные креды для dev/prod окружений задаются через секреты платформы деплоя и не попадают в репозиторий или логи.
+
+Таким образом, проект демонстрирует сразу несколько признаков «превосходства» из формулировки курса:
+
+- матрица версий + кэш,
+- детальные отчёты покрытия и статических проверок,
+- релизные артефакты (Docker-образ + security-репорты),
+- корректная работа с секретами без хардкода в коде и CI.
